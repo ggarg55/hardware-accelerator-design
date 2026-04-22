@@ -46,6 +46,37 @@ flowchart LR
     style TRAN fill:#E91E63,color:#fff
 ```
 
+### Code Example: Simulating Patchification
+
+```python
+import numpy as np
+
+def patchify(image, patch_size=16):
+    """Reshape a 2D image into 1D patches."""
+    H, W, C = image.shape
+    # 1. Split into grid
+    patches = image.reshape(H // patch_size, patch_size, 
+                            W // patch_size, patch_size, C)
+    
+    # 2. Swap axes to bring patch pixels together
+    patches = patches.transpose(0, 2, 1, 3, 4)
+    
+    # 3. Flatten each patch into a 1D vector (P*P*C)
+    num_patches = (H // patch_size) * (W // patch_size)
+    patch_dim = patch_size * patch_size * C
+    flat_patches = patches.reshape(num_patches, patch_dim)
+    
+    return flat_patches
+
+# Simulation: 224x224 RGB image
+image = np.random.rand(224, 224, 3)
+p_vecs = patchify(image)
+
+print(f"Original Shape: {image.shape}")
+print(f"Number of Patches: {p_vecs.shape[0]}")
+print(f"Vector Length per Patch: {p_vecs.shape[1]}")
+```
+
 ---
 
 ## 3. Hardware Profile: CNN vs. ViT
@@ -65,6 +96,25 @@ Why does hardware care whether the software uses a CNN or a ViT? The performance
 ### Which is better?
 At lower data scales, CNNs outperform ViTs because their hardware-friendly inductive biases naturally understand 2D reality. However, at massive data scales (billions of images), ViTs pull ahead due to **Scaling Laws**. 
 CNNs reach a point of diminishing returns because their sliding windows are limited to local context. ViTs, with their global attention, can learn complex global relationships that CNNs physically cannot "see," provided the hardware can handle the massive memory bandwidth required to fetch the weights.
+
+---
+
+## 4. Worked Example: Computational Intensity (CNN vs. ViT)
+
+Let's estimate the raw FLOPs for one layer on a standard $224 \times 224 \times 64$ feature map.
+
+**Scenario A: Standard 3x3 CNN Layer**
+- Kernel size = $3 \times 3 \times 64 = 576$ weights.
+- Multiplications = $224 \times 224 \times 64 \times 576 \approx \mathbf{1.8 \text{ Billion FLOPs}}$.
+- **Hardware Profile**: High data reuse. We use the same 576 weights for all 50,000 pixels.
+
+**Scenario B: Self-Attention (ViT with 16x16 patches)**
+- Sequence $N = 196$. Head Dim $d = 768$.
+- Attention Matrix Multiplications ($2 \times N^2 \times d$): $2 \times 196^2 \times 768 \approx \mathbf{59 \text{ Million FLOPs}}$.
+- Projection weights ($3 \times N \times d^2$): $3 \times 196 \times 768^2 \approx \mathbf{346 \text{ Million FLOPs}}$.
+- **Total**: $\approx \mathbf{0.4 \text{ Billion FLOPs}}$.
+
+**Conclusion**: For a standard resolution, a ViT actually uses **fewer math operations** than a dense CNN. However, because its weights are much larger and not reused spatially, the ViT feels "heavier" on hardware because it is constantly waiting for DRAM to provide the next set of weights.
 
 ---
 
@@ -107,6 +157,21 @@ CNNs reach a point of diminishing returns because their sliding windows are limi
 - $2508 = 1,048,576 / P^2  \rightarrow  P^2 = 418.09  \rightarrow  P = \mathbf{20.44}$.
 - Since patch sizes must ideally be powers of 2 (or at least integers), we must round **up** to lower the sequence length further. 
 - A patch size of **$32 \times 32$** yields $N = (1024/32)^2 = 32^2 = 1024$. The matrix size is $1024^2 \times 2 = \mathbf{2.09 \text{ MB}}$, nicely fitting our target.
+
+### Problem 2: Inductive Bias and Data Scaling
+
+> **Context**: You are deciding whether to deploy a CNN (ResNet) or a ViT for a new industrial defect detection task.
+>
+> **Tasks**:
+> - (a) If your training dataset only contains **1,000 images**, which architecture is likely to achieve higher accuracy? [1]
+> - (b) Why do CNNs have a "lower ceiling" for accuracy even as you add trillions of images? [1]
+
+<details>
+<summary><b>Solution</b></summary>
+
+**(a)** The **CNN**. With very little data, the CNN's "Inductive Bias" (knowing that images have local structure) acts as a helpful hint. The ViT, starting with no spatial knowledge, will likely overfit and fail to learn anything meaningful from only 1,000 images.
+
+**(b)** Because of the **Local Reception**. A CNN is limited by its kernel size (e.g., $3 \times 3$). To understand a relationship between the top-left and bottom-right of an image, the information must travel through dozens of layers, possibly losing detail and "signal" along the way. A ViT connects every pixel to every other pixel in human-scale context in the very first layer, giving it a much higher capacity for complex global understanding.
 
 </details>
 

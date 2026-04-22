@@ -93,7 +93,46 @@ flowchart LR
     style I_OUT fill:#4CAF50,color:#fff
 ```
 
+### 3.3 The Crossbar Operation Walkthrough
+
+To compute a layer, the CIM hardware follows these steps:
+1. **Programming Phase**: The Weight matrix $W$ is converted into conductance values. A "Write" circuit applies high-voltage pulses to set the resistance of each ReRAM cell at the intersection of rows and columns.
+2. **Inference Phase**: 
+    - The Input vector $X$ is converted into analog voltages $V_j$ by DACs.
+    - All $V_j$ are applied to the horizontal rows **simultaneously**.
+    - Current $I_{i,j} = V_j \cdot G_{i,j}$ flows through each cell.
+    - According to Kirchhoff's Law, the total current $I_{out, i}$ at the bottom of column $i$ is the sum of all currents in that column.
+    - $I_{out, i} = \sum_j V_j \cdot G_{i,j}$.
+3. **Conversion Phase**: The ADCs at the bottom of each column sample the current and convert it back into a digital number for the next layer.
+
 **The Power of CIM:** A massively parallel digital TPU needs thousands of discrete logic gates to do this. An analog ReRAM crossbar does it in a single step merely by pulsing electricity through a grid of programmable resistors. The memory *is* the multiplier. The wires *are* the adders.
+
+### Code Example: Simulating an Analog Crossbar
+
+```python
+import numpy as np
+
+def simulate_crossbar(V_in, G_matrix, noise_sigma=0.01):
+    """Simulate physical matrix multiplication in a ReRAM crossbar."""
+    # Add physical noise (variability in programming conductance)
+    G_noisy = G_matrix + np.random.normal(0, noise_sigma, G_matrix.shape)
+    
+    # Kirchhoff's Law: I[channel] = sum(V[row] * G[row, channel])
+    I_out = np.dot(V_in, G_noisy)
+    
+    return I_out
+
+# Weights quantized to conductances (0.0 to 1.0 mS)
+weights = np.array([[0.5, 0.1], [0.2, 0.8]])
+inputs = np.array([0.9, 0.4]) # Input voltages
+
+ideal_result = np.dot(inputs, weights)
+analog_result = simulate_crossbar(inputs, weights)
+
+print(f"Ideal Physical Result: {ideal_result}")
+print(f"Noisy Analog Result:  {analog_result}")
+print(f"Error: {np.abs(ideal_result - analog_result)}")
+```
 
 ---
 
@@ -113,6 +152,29 @@ Furthermore, as we increase precision (e.g., from 4-bit to 8-bit), the ADC size 
 
 ### The SRAM Alternative
 While ReRAM is the future, many researchers use **SRAM-based CIM** today. By activating multiple "Wordlines" simultaneously in a standard SRAM bank, you can force the bitlines to discharge at a rate proportional to the stored bits. This allows us to use mature silicon manufacturing processes while still gaining the benefits of collocated compute.
+
+---
+
+## 5. Worked Example: Crossbar Math with Noise
+
+Let's calculate the precision impact of using an analog crossbar.
+
+**Inputs**: $V = [0.1, 0.8, 0.5]$ Volts
+**Weights (Conductances)**: $G = [100, 200, 50] \ \mu\text{S}$
+
+**Step 1: Calculate Ideal Current**
+- $I_1 = 0.1 \text{ V} \times 100 \ \mu\text{S} = 10 \ \mu\text{A}$
+- $I_2 = 0.8 \text{ V} \times 200 \ \mu\text{S} = 160 \ \mu\text{A}$
+- $I_3 = 0.5 \text{ V} \times 50 \ \mu\text{S} = 25 \ \mu\text{A}$
+- **Total Ideal $I$** = $10 + 160 + 25 = \mathbf{195 \ \mu\text{A}}$.
+
+**Step 2: Introduce Device Variation**
+Suppose the middle memristor ($G_2$) has a "programming error" of $+10\%$.
+- $G_{2,noisy} = 220 \ \mu\text{S}$
+- $I_{2,noisy} = 0.8 \times 220 = 176 \ \mu\text{A}$
+- **Total Noisy $I$** = $10 + 176 + 25 = \mathbf{211 \ \mu\text{A}}$.
+
+**Conclusion**: In digital logic, $2 \times 2$ is always $4.000$. In analog CIM, $2 \times 2$ might be $4.1$ or $3.9$ depending on the physical temperature and the precision of the memristor chemistry. This is why **Noise-Aware Training** is required for CIM models.
 
 ---
 
@@ -158,6 +220,29 @@ While ReRAM is the future, many researchers use **SRAM-based CIM** today. By act
 - $I_{total} = I_1 + I_2$
 - $I_{total} = 10 \ \mu A + 50 \ \mu A = \mathbf{60 \ \mu A}$
 - The ADC array must be calibrated to recognize `60 Micro-Amps` as the specific Integer equivalent for that neural output.
+
+### Problem 2: The ADC Bottleneck
+
+> **Context**: You are designing a CIM chip for an INT8 model. You have a choice between two ADCs for your crossbar columns:
+> 1. **ADC-A (4-bit)**: Consumes **1 pJ** per conversion.
+> 2. **ADC-B (8-bit)**: Consumes **16 pJ** per conversion.
+>
+> **Tasks**:
+> - (a) If your model is trained for 8-bit precision, but you use ADC-A to save power, what happens to your model's accuracy? [1]
+> - (b) If your crossbar has 128 columns and operates at 100 MHz, what is the power consumption of the ADC array using ADC-B? [2]
+
+<details>
+<summary><b>Solution</b></summary>
+
+**(a)** Accuracy Loss:
+- Using a 4-bit ADC means your 8-bit math is "crushed" back down to 16 levels ($2^4$) at every layer. 
+- You lose information at every step, likely crashing the model's performance to $0\%$ or near-random unless you use **Quantization-Aware Training** (Module 5) to specifically learn to live with 4 bits.
+
+**(b) Power Calculation (ADC-B):**
+- Operations/sec = 128 columns $\times 100 \times 10^6 \text{ Hz} = 12,800,000,000 \text{ conversions/sec}$.
+- Power = $12.8 \times 10^9 \text{ conv/s} \times 16 \times 10^{-12} \text{ J/conv}$
+- **Power = 204.8 mW**.
+- **Analysis**: Even though the "math" in the crossbar only uses a few milliwatts, the ADCs alone consume over $200$ mW. This is the **Conversion Tax** of analog computing.
 
 </details>
 

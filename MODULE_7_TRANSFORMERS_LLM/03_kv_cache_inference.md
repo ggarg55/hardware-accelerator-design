@@ -48,23 +48,83 @@ LLM inference is split into two physically different hardware profiles:
 2. **The Decode Phase (Generation)**: The model generates tokens one by one. For every new word, it performs a **matrix-vector** multiplication. Because $N=1$, the data reuse is near zero. This phase is extremely **Memory-Bound** (Left side of the Roofline). You are reading 140GB of weights from HBM just to do a tiny bit of math for one word.
 
 ### How the Cache Works Step-by-Step:
-1. **Pre-fill:** Compute the initial prompt in parallel (fast). Save all $K$ and $V$ vectors to the KV Cache in VRAM.
-2. **Decode:** To generate the next token:
-   - We only pass the *newest* single token into the model.
-   - We calculate a single $Q$, $K$, and $V$ vector for that one token.
-   - We append the new $K$ and $V$ to the cache.
-   - We calculate Attention using the *single* new $Q$, against the *entire historical cache* of $K$ and $V$.
+1. **Pre-fill (Iter 0):** 
+   - Compute the initial prompt of $N$ tokens in parallel ($Q, K, V$).
+   - Load $N$ vectors into the KV Cache.
+2. **Decoding (Iter 1):** 
+   - Input the predicted token $N+1$ only.
+   - Calculate one $q_{N+1}$ vector.
+   - Read all $1$ to $N$ keys from memory.
+   - Calculate attention scores $\text{dot}(q_{N+1}, \text{Cache}_K)$.
+   - Sum with all $1$ to $N$ values.
+3. **Decoding (Iter 2):**
+   - Repeat. Now you read $1$ to $N+1$ keys.
+
+**Observation**: Every word you generate makes the next word **more expensive** to calculate because the KV Cache grows longer!
+
+### Code Example: Simulating KV Cache Growth
+
+```python
+import torch
+
+class KVCacheSimulator:
+    def __init__(self, layers, heads, dim):
+        self.cache_k = [[] for _ in range(layers)]
+        self.cache_v = [[] for _ in range(layers)]
+        
+    def generate_token(self, new_k, new_v):
+        """Append new token projections to the cache."""
+        for i in range(len(self.cache_k)):
+            self.cache_k[i].append(new_k[i])
+            self.cache_v[i].append(new_v[i])
+            
+        # The 'context length' is now the number of items in the cache
+        return len(self.cache_k[0])
+
+# Simulating a small model (2 layers, 4 heads, 64 dim)
+sim = KVCacheSimulator(layers=2, heads=4, dim=64)
+
+for i in range(5):
+    # Dummy projections for a new word
+    k = torch.randn(2, 4, 64)
+    v = torch.randn(2, 4, 64)
+    length = sim.generate_token(k, v)
+    print(f"Token {i+1} generated. Total KV Cache Context: {length} tokens")
+```
+
+---
+
+## 4. Worked Example: Decoding - The Memory Bandwidth Wall
+
+Let's calculate the Arithmetic Intensity (Module 4) for generating one single token.
+
+**Model**: Llama-3-70B (70 Billion Parameters)
+**Hardware**: H100 GPU (2000 GB/s HBM bandwidth)
+
+**1. The Data Load**:
+- To predict one token, the GPU must read every single model weight from memory once.
+- Weight data = $70 \text{ Billion} \times 2 \text{ bytes (FP16)} = \mathbf{140 \text{ GB}}$.
+
+**2. The Compute**:
+- A 70B parameter model doing one token inference does roughly 140 Billion FLOPs ($2 \times \text{Params}$).
+
+**3. Arithmetic Intensity**:
+- $Intensity = \text{FLOPs} / \text{Bytes} = 140 \text{ GFLOPs} / 140 \text{ GB} = \mathbf{1}$.
+
+**Conclusion**: On an H100 (which has an intensity threshold of $\approx 150$), an Intensity of **1** is deep in the "Memory-Bound" region. The GPU will spend **$149 \times$** more time waiting for the 140GB of weights to travel from HBM than it will actually spending calculating the new word. This is why LLMs feel "slow" relative to the massive teraflops of the chip.
+
+---
 
 ```mermaid
 flowchart TD
-    subgraph Iteration 1: Generated "the"
+    subgraph Iter1 ["Iteration 1: Generated 'the'"]
         T1["Prompt: 'The cat sat on'"] --> |Compute| QKV1["All Q,K,V calculated"]
         QKV1 --> OUT1["Output: 'the'"]
         
         QKV1 -.-> |"Save K,V"| CACHE[("KV CACHE<br/>(Massive VRAM Space)")]
     end
     
-    subgraph Iteration 2: Generating "mat"
+    subgraph Iter2 ["Iteration 2: Generating 'mat'"]
         T2["New Token ONLY: 'the'"] --> |Compute| QKV2["Only ONE Q,K,V calculated"]
         
         CACHE -.-> |"Load old K,V"| ATTN(("Flash Attention Node"))
@@ -126,6 +186,31 @@ If each user takes 2GB of VRAM (see Problem 1), you need $20,000 \text{ GB}$ of 
 **3. Convert to MB:**
 - $2,147,483,648 / (1024 \times 1024) = \mathbf{2048 \text{ MB} \ (\text{or } 2 \text{ GB})}$.
 - *It costs 2 GB of ultra-expensive HBM VRAM just to hold the context for this one user.*
+
+</details>
+
+---
+
+### Problem 2: Parameter Efficiency (MHA vs. MQA)
+
+> **Context**: To save VRAM, some models use **Multi-Query Attention (MQA)**. Instead of $h$ unique Key/Value heads, all Query heads share a **single** Key/Value head.
+> 
+> **Tasks**:
+> - (a) Using the model from Problem 1 (32 heads, 32 layers, $d_k=128$), how much VRAM would the 4096-token KV Cache take if it used **MQA**? [2]
+> - (b) What is the VRAM reduction factor? [1]
+
+<details>
+<summary><b>Solution</b></summary>
+
+**(a) MQA Calculation:**
+- In MHA (Problem 1), we stored 32 KV heads.
+- In MQA, we store **1** KV head per layer.
+- Previous size = $2048 \text{ MB}$.
+- New size = $2048 \text{ MB} / 32 = \mathbf{64 \text{ MB}}$.
+
+**(b) Reduction Factor:**
+- $2048 / 64 = \mathbf{32\times}$.
+- By sharing the KV vectors across all Query heads, we cut our memory requirements by 96%. This allows us to serve 32 times more users on the same GPU!
 
 </details>
 

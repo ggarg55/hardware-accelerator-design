@@ -119,12 +119,13 @@ flowchart TD
 **Row Stationary** is a highly innovative dataflow pioneered by MIT's **Eyeriss** project.
 Rather than locking one specific data type perfectly, RS maps a *1D row* of a convolution onto a *1D row* of PEs.
 
-In this layout, the array takes advantage of the distinct sliding window nature of a 2D convolution. PEs are given small specialized local scratchpad registers.
-- A row of weights stays in a PE row.
-- A row of inputs slides horizontally through that PE row.
-- The partial sums accumulate vertically across PE rows.
+### The 1D Mapping Logic
+In this layout, the array takes advantage of the distinct sliding window nature of a 2D convolution. 
+1. **Vertical Mapping**: Different rows of the weight filter are assigned to different rows of PEs.
+2. **Horizontal Sliding**: As the input row (activations) slides horizontally through the PE row, it interacts with the stationary weight row.
+3. **Diagonal Pass-through**: Because a 2D convolution involves multiple rows of inputs contributing to the same output row, the partial sums are passed diagonally/vertically to be summed at the correct time.
 
-This maximizes the **local spatial reuse** of ALL three data types simultaneously. Everything stays mostly localized on a single row or column. 
+This maximizing **local spatial reuse** of ALL three data types simultaneously. Everything stays mostly localized on a single row or column. 
 
 **How it works (The Metaphor):** 
 Imagine three jugglers. 
@@ -141,7 +142,31 @@ Imagine three jugglers.
 
 ---
 
-## 6. Summary Comparison Matrix
+## 6. Worked Example: Comparative Data Movement
+
+Consider computing a convolution where the filter is $3 \times 3$ and we have a $5 \times 5$ input tile.
+
+### Scenario A: Weight Stationary
+- The 9 weights are loaded into a $3 \times 3$ grid.
+- **Cost**: 9 SRAM reads (once).
+- Every input pixel must be read from SRAM and broadcast. For a $5 \times 5$ input, that's $25$ SRAM reads.
+- Every partial sum must be moved move south. For a $3 \times 3$ output, that's roughly $9 \times 3 = 27$ movements.
+
+### Scenario B: Output Stationary
+- The 9 output partial sums are anchored in the $3 \times 3$ grid.
+- **Cost**: 0 partial sum movements (until the end).
+- Every weight must be pulsed through. $9$ weights $\times$ number of times they are reused.
+- Every input must be pulsed through.
+
+### Scenario C: Row Stationary (Eyeriss)
+- A row of 3 weights is stored in PE Row 1.
+- A row of 3 weights is stored in PE Row 2.
+- An input row slides through Row 1, then the *same data* is reused in Row 2 (offset by 1).
+- **Physical Result**: RS reduces the total number of SRAM accesses by **over 60%** compared to WS or OS by reusing the input row across multiple PE rows and keeping the partial sums within the same column.
+
+---
+
+## 7. Summary Comparison Matrix
 
 | Feature | Weight Stationary (WS) | Output Stationary (OS) | Row Stationary (RS) |
 |:---|:---|:---|:---|

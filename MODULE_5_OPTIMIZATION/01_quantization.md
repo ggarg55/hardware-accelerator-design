@@ -27,6 +27,21 @@ Furthermore, memory bandwidth relies directly on the size of the data. Sending a
 
 The catch? We lose decimal precision. **Quantization** is the math of compressing that precision into integers with as little accuracy loss as possible.
 
+```mermaid
+graph LR
+    subgraph Range ["Floating Point (Smooth)"]
+        R1[-2.0] --- R2[-1.0] --- R3[0.0] --- R4[1.0] --- R5[2.0]
+    end
+    
+    Range -->|Quantize| Steps
+    
+    subgraph Steps ["INT8 (Chunky)"]
+        Q1[0] --- Q2[64] --- Q3[128] --- Q4[192] --- Q5[255]
+    end
+    
+    style Steps fill:#f9f,stroke:#333,stroke-width:2px
+```
+
 > **Analogy**: Quantization is like building a model of a smooth, rounded mountain using standard Lego bricks. If you use thousands of tiny clear bricks (FP32), the mountain looks perfectly smooth and realistic. If you are forced to use only 256 large chunky bricks (INT8), the mountain starts to look like a jagged staircase. Your goal in quantization is to choose exactly where to place those 256 bricks so that the "staircase" still captures the true shape of the peak.
 
 ---
@@ -100,6 +115,36 @@ As models scale to billions of parameters (like LLMs), even INT8 is occasionally
 - **Binary/1-bit ([-1, 1]):** Using XNOR gates instead of MACs. A network relying on this is called a BNN (Binary Neural Network).
 
 While INT4 reduces memory drastically, the hardware MAC required to extract and compute 4-bit numbers packed tightly into 8-bit bus lines requires specialized unpacking logic. 
+
+---
+
+## 5. Worked Example: Quantizing a Weight Tensor
+
+Let's walk through quantizing a small $2 \times 2$ weight matrix from FP32 to unsigned INT8.
+
+**Weights ($W_{fp32}$):**
+$$ W = \begin{bmatrix} -1.2 & 0.5 \\ 2.8 & 3.5 \end{bmatrix} $$
+
+**Step 1: Identify Ranges**
+- $r_{min} = -1.2, r_{max} = 3.5$.
+- $q_{min} = 0, q_{max} = 255$.
+
+**Step 2: Calculate Scale ($S$)**
+- $S = \frac{3.5 - (-1.2)}{255 - 0} = \frac{4.7}{255} \approx \mathbf{0.01843}$.
+
+**Step 3: Calculate Zero-Point ($Z$)**
+- $Z = \text{round}\left(0 - \frac{-1.2}{0.01843}\right) = \text{round}(65.11) = \mathbf{65}$.
+
+**Step 4: Quantize the Values ($q = \text{round}(r/S) + Z$)**
+- $w_{1,1} \rightarrow \text{round}(-1.2 / 0.01843) + 65 = -65 + 65 = \mathbf{0}$. (Correct, $r_{min}$ should map to $q_{min}$)
+- $w_{1,2} \rightarrow \text{round}(0.5 / 0.01843) + 65 = 27 + 65 = \mathbf{92}$.
+- $w_{2,1} \rightarrow \text{round}(2.8 / 0.01843) + 65 = 152 + 65 = \mathbf{217}$.
+- $w_{2,2} \rightarrow \text{round}(3.5 / 0.01843) + 65 = 190 + 65 = \mathbf{255}$. (Correct, $r_{max}$ should map to $q_{max}$)
+
+**Resulting INT8 Matrix:**
+$$ W_{int8} = \begin{bmatrix} 0 & 92 \\ 217 & 255 \end{bmatrix} \quad (S=0.01843, Z=65) $$
+
+---
 
 ### Code Example: Affine Quantization
 
@@ -175,6 +220,31 @@ print(f"Max error:   {np.max(np.abs(weights - r_hat)):.4f}")
 - $q = \text{round}(3.0 / 0.02941) + 51$
 - $q = \text{round}(102) + 51$
 - $\mathbf{q = 153}$
+
+### Problem 2: Dynamic Range vs. LSB
+
+> **Context**: You have two model weights:
+> 1. Weight A: Range $[-10.0, 10.0]$
+> 2. Weight B: Range $[-0.1, 0.1]$
+> Both are quantized to signed INT8 $(-128$ to $127)$.
+> 
+> **Tasks**:
+> - (a) Calculate the precision (the value of the Least Significant Bit, $S$) for both. [1]
+> - (b) Which weight suffers from higher relative rounding error if the true value is $0.005$? [1]
+
+<details>
+<summary><b>Solution</b></summary>
+
+**(a) Precision ($S$):**
+- In signed symmetric quantization, $S = \text{Max\_Abs\_Value} / 127$.
+- Weight A: $S = 10.0 / 127 = \mathbf{0.0787}$.
+- Weight B: $S = 0.1 / 127 = \mathbf{0.000787}$.
+
+**(b) Rounding Error:**
+- To represent $0.005$:
+- **Weight A**: $q = \text{round}(0.005 / 0.0787) = \text{round}(0.06) = 0$. The value is completely lost (error = $0.005$).
+- **Weight B**: $q = \text{round}(0.005 / 0.000787) = \text{round}(6.35) = 6$. The value is preserved (error = $0.00028$).
+- **Result**: Weight A suffers more because its massive dynamic range forces a "coarse" staircase that cannot resolve small numbers.
 
 </details>
 

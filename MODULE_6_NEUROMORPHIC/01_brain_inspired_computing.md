@@ -120,6 +120,55 @@ flowchart TD
 
 When an Event Camera is paired with an asynchronous Spiking Neural Network hardware chip (like Intel's Loihi), you get true brain-inspired edge AI.
 
+### Code Example: Simulating DVS Event Generation
+
+```python
+import numpy as np
+
+def simulate_dvs_pixel(prev_brightness, curr_brightness, threshold=0.1):
+    """Simulate the logic of a single DVS pixel."""
+    diff = curr_brightness - prev_brightness
+    
+    if diff > threshold:
+        return (True, +1)  # ON Event (Brighter)
+    elif diff < -threshold:
+        return (True, -1)  # OFF Event (Darker)
+    else:
+        return (False, 0)  # No Event (Silent)
+
+# Imagine a pixel watching a moving object
+brightness_over_time = [0.5, 0.51, 0.7, 0.75, 0.2, 0.21]
+prev = brightness_over_time[0]
+
+print("Time | Value | Event")
+print("-" * 22)
+for t, val in enumerate(brightness_over_time[1:], 1):
+    fired, polarity = simulate_dvs_pixel(prev, val)
+    event_str = f"Spike({polarity:+})" if fired else "Silent"
+    print(f"t={t}  | {val:.2f}  | {event_str}")
+    prev = val
+```
+
+---
+
+## 5. Worked Example: The Energy of a Single Bit Move
+
+Let's calculate why the Von Neumann Bottleneck is essentially a thermal problem.
+
+**The Parameters**:
+- **ALU Operation**: $0.1 \text{ pJ}$ (pico-Joules) per bit multiplication.
+- **Memory Move**: $100 \text{ pJ}$ per bit move from DRAM to ALU.
+
+**Scenario A: Von Neumann (TPU/GPU)**
+- To multiply a Weight $W$ and Activation $X$, we must fetch both from DRAM.
+- Energy = $(100 \text{ pJ} \times 2 \text{ fetches}) + 0.1 \text{ pJ} = \mathbf{200.1 \text{ pJ}}$.
+- **Analysis**: $99.95\%$ of the energy was wasted just moving the data.
+
+**Scenario B: Neuromorphic (Co-located Synapse)**
+- Weight is stored directly in the synapse circuit. Only Activation flows.
+- Energy = $100 \text{ pJ (Input fetch)} + 0.1 \text{ pJ} = \mathbf{100.1 \text{ pJ}}$.
+- **Analysis**: By co-locating memory, we instantly cut the power draw of the chip by half.
+
 ---
 
 ## Key Takeaways
@@ -157,6 +206,23 @@ When an Event Camera is paired with an asynchronous Spiking Neural Network hardw
 **(c)** Reduction Factor:
 - $62,208,000 / 165,888 = \mathbf{375\times \text{ Reduction}}$.
 - The event camera uses 375 times less bandwidth while inherently tracking the motion of the car.
+
+### Problem 2: Clock Power vs. Event Power
+
+> **Context**: You have two chips processing a surveillance feed:
+> 1. **Chip A (Synchronous)**: Refreshes all 1 million pixels at $30 \text{ Hz}$ regardless of content.
+> 2. **Chip B (Asynchronous)**: Consumes energy only when a pixel changes.
+>
+> **Tasks**:
+> - If only $1,000$ pixels change per second (a very still scene), and both chips consume $10 \text{ nJ}$ per pixel refresh, calculate the power ratio. [2]
+
+<details>
+<summary><b>Solution</b></summary>
+
+- **Chip A (Sync)**: $1,000,000 \text{ pixels} \times 30 \text{ Hz} = 30,000,000 \text{ operations/sec}$.
+- **Chip B (Async)**: $1,000 \text{ events/sec} = 1,000 \text{ operations/sec}$.
+- **Ratio**: $30,000,000 / 1,000 = \mathbf{30,000\times}$
+- **Conclusion**: In idle scenes, Neuromorphic hardware is tens of thousands of times more efficient because it doesn't waste energy "confirming the background is still there."
 
 </details>
 

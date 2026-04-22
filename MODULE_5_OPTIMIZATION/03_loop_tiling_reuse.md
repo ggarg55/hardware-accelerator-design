@@ -53,6 +53,26 @@ While Loop Reordering helps, it isn't enough if the matrices are massive. If `Ch
 
 **Loop Tiling** (often called Loop Blocking) is the process of breaking a massive matrix multiplication down into smaller sub-matrix blocks (tiles) that fit perfectly inside the local, ultra-fast memory (like a TPU's 24MB local SRAM buffer, or a PE's inner Scratchpad).
 
+```mermaid
+flowchart TD
+    subgraph DRAM ["DRAM (Massive Data)"]
+        D1["[Matrix A]"]
+        D2["[Matrix B]"]
+    end
+    
+    DRAM -->|Fetch Tile| SRAM
+    
+    subgraph SRAM ["Local SRAM (Working Tiles)"]
+        T1["Tile A (64x64)"]
+        T2["Tile B (64x64)"]
+    end
+    
+    SRAM -->|Iterate| MAC["Systolic Array Core"]
+    
+    style SRAM fill:#4CAF50,color:#fff
+    style DRAM fill:#ECEFF1
+```
+
 ### The Math of Tiling
 Instead of doing a massive 1000x1000 matrix multiplication in one pass, we break the loop into "Outer Loops" (which pull chunks from DRAM) and "Inner Loops" (which compute exclusively from SRAM).
 
@@ -98,6 +118,26 @@ Real accelerators use multi-level tiling and reordering. An advanced neural comp
 
 This massive optimization process is why a poorly optimized script running natively in Python on an accelerator might achieve 2% hardware utilization, while a compiled script hitting the tensor cores hits 95% utilization.
 
+This massive optimization process is why a poorly optimized script running natively in Python on an accelerator might achieve 2% hardware utilization, while a compiled script hitting the tensor cores hits 95% utilization.
+
+---
+
+## 5. Worked Example: Bandwidth Savings from Tiling
+
+Suppose you are running a large matrix multiplication $N=1024$ and your hardware Tile Size $B=64$.
+
+**Scenario A: No Tiling**
+- For every row of A, you fetch every column of B from DRAM.
+- Total bytes read = $N^2 (\text{for A}) + N^3 (\text{for B}) = 1024^2 + 1024^3 \approx \mathbf{1 \text{ Giga-Byte}}$.
+
+**Scenario B: With $64 \times 64$ Tiling**
+- You fetch a $64 \times 64$ tile of A and a $64 \times 64$ tile of B.
+- You perform $2 \times 64^3$ operations inside the SRAM.
+- Total bytes read from DRAM = $(N/B) \times (N/B) \times (N/B) \times (B^2 + B^2)$
+- Total bytes read = $(N^3 / B^2) \times 2 = (1024^3 / 64^2) \times 2 = \mathbf{524 \text{ Kilo-Bytes}}$.
+
+**Result**: By using a small $64 \times 64$ SRAM cache, you reduced the required DRAM bandwidth by a factor of nearly **$2000\times$**! This is why loop tiling is the single most important software optimization in deep learning.
+
 ---
 
 ## Key Takeaways
@@ -129,6 +169,28 @@ This massive optimization process is why a poorly optimized script running nativ
 - $T \le \sqrt{5461.33} \approx 73.9$
 - Since tiles are typically powers of 2 for easy binary shifting and addressing, we would optimally choose a tile size of $T = 64$.
 - Space used by $T=64$: $3 \times (64 \times 64) = 12,288$ bytes. It fits perfectly!
+
+### Problem 2: The Tail Problem (Padding)
+
+> **Context**: You are using a tile size of $64 \times 64$. However, the input layer of your model has a dimension of $100 \times 100$.
+> 
+> **Tasks**:
+> - (a) How many tiles are needed to cover the $100 \times 100$ matrix? [1]
+> - (b) What is the "Surface Efficiency" (the percentage of active MACs) in the "Tail" tiles (the partial tiles at the edges)? [1]
+
+<details>
+<summary><b>Solution</b></summary>
+
+**(a) Tile Count:**
+- You need $ceil(100 / 64) = 2$ tiles horizontally and 2 tiles vertically.
+- Total = $2 \times 2 = \mathbf{4}$ **tiles**.
+
+**(b) Surface Efficiency:**
+- The first tile $(64 \times 64)$ is 100% full.
+- The "Tail" tile in the horizontal dimension covers $100 - 64 = 36$ pixels out of the 64 available.
+- Tile occupancy = $36 / 64 = 56.25\%$.
+- The bottom-right corner tile occupies $(36 \times 36) / (64 \times 64) = \mathbf{31.6\%}$.
+- **Result**: Layers with dimensions not divisible by the hardware's native tile size suffer from "Internal Fragmentation," where many MAC units are forced to multiply by zero just to keep the grid aligned.
 
 </details>
 

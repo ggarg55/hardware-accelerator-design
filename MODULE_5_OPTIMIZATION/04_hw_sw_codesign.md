@@ -48,13 +48,64 @@ Because Convolution is also linear ($Wx + b$), the compiler can pre-calculate th
 
 Furthermore, ReLU is just a threshold check. 
 
-**The result:**
-1. Fetch the "Fused" weights and original inputs from DRAM.
-2. Run the fused **Convolution**. 
-3. *While the partial sum is physically inside the ALU register*, check the sign bit (the ReLU test).
-4. Pipe the output *directly* as the input to **Convolution 2** in the same hardware pipeline.
+```mermaid
+sequenceDiagram
+    participant D as DRAM
+    participant S as SRAM/Cache
+    participant A as ALU (PE)
+    
+    rect rgb(200, 220, 255)
+    Note over D,A: Siloed Execution (Unfused)
+    D->>S: Load Conv Input
+    S->>A: Compute Conv
+    A-->>S: Partial Sum
+    S-->>D: Write Activation (TRIP 1)
+    D->>S: Read Activation (TRIP 2)
+    S->>A: Apply ReLU
+    A-->>S: ReLU Result
+    S-->>D: Write Final (TRIP 3)
+    end
+    
+    rect rgb(220, 255, 220)
+    Note over D,A: Co-Designed Execution (Fused)
+    D->>S: Load Conv Input
+    S->>A: Compute Conv
+    Note right of A: Register-Level ReLU
+    A-->>S: Fused Result
+    S-->>D: Write Final (TRIP 1)
+    end
+```
 
-**We reduced the DRAM traffic from 6 trips down to roughly 1.** This is Hardware-Software Co-Design in its purest form. The compiler structurally manipulates the software graph to accommodate the specific physical pipeline depth of the hardware array.
+**We reduced the DRAM traffic from 3 trips down to 1.** This is Hardware-Software Co-Design in its purest form. The compiler structurally manipulates the software graph to accommodate the specific physical pipeline depth of the hardware array.
+
+### Code Example: Folding BatchNorm into Convolution
+
+```python
+import numpy as np
+
+def fold_batchnorm(conv_w, conv_b, bn_gamma, bn_beta, bn_mean, bn_var, eps=1e-5):
+    """Mathematically merge BN params into Conv weights."""
+    # Precompute BN denominator
+    denom = np.sqrt(bn_var + eps)
+    
+    # New Fused Weights: W_f = W * (gamma / sqrt(var + eps))
+    fused_w = conv_w * (bn_gamma / denom).reshape(-1, 1, 1, 1)
+    
+    # New Fused Bias: b_f = ((b - mean) * gamma / sqrt(var + eps)) + beta
+    fused_b = ((conv_b - bn_mean) * (bn_gamma / denom)) + bn_beta
+    
+    return fused_w, fused_b
+
+# 1 channel conv, 3x3 filter
+w = np.random.randn(1, 1, 3, 3)
+b = np.array([0.5])
+# BN params
+mean, var = np.array([0.1]), np.array([0.2])
+gamma, beta = np.array([0.8]), np.array([1.2])
+
+f_w, f_b = fold_batchnorm(w, b, gamma, beta, mean, var)
+print("Fusion complete. The hardware now only runs 1 Conv layer.")
+```
 
 ---
 
@@ -81,6 +132,26 @@ Early NAS algorithms only cared about raw accuracy. They resulted in monstrous, 
 - "Find the model with the best bounding-box detection, but it must run at 30 FPS on a 2 TOPS integer accelerator."
 
 Projects like **MobileNetV3** and **EfficientNet** were born from these algorithms. The AI discovered that replacing standard 3D Convolutions with "Depthwise-Separable Convolutions" perfectly balanced the workload between the compute units and the memory bandwidth, resulting in a network inherently designed for edge accelerator hardware.
+
+---
+
+## 5. Worked Example: Bandwidth Reduction through Fusion
+
+Consider an activation tensor of size $224 \times 224$ with $64$ channels (FP32 precision, 4 bytes per pixel).
+
+**The Workflow**: `Conv1 -> ReLU -> Pool -> Conv2`
+
+**A. Siloed execution (No Fusion):**
+1. Conv1 Write: $224 \times 224 \times 64 \times 4 = \mathbf{12.8 \text{ MB}}$.
+2. ReLU Read ($12.8 \text{ MB}$) + ReLU Write ($12.8 \text{ MB}$) = $\mathbf{25.6 \text{ MB}}$.
+3. Pool Read ($12.8 \text{ MB}$) + Pool Write ($12.8 \text{ MB}$) = $\mathbf{25.6 \text{ MB}}$. (Assume 1:1 for simplicity)
+- **Total DRAM traffic**: $\approx \mathbf{64 \text{ MB}}$.
+
+**B. Fused execution (Conv+ReLU+Pool in one pass):**
+1. Conv1 Write (After internal ReLU and Pool logic inside the chip): $\mathbf{12.8 \text{ MB}}$.
+- **Total DRAM traffic**: $\mathbf{12.8 \text{ MB}}$.
+
+**Conclusion**: By simply merging the activation and pooling logic into the convolution hardware pipeline, we achieved a **$5\times$ reduction** in DRAM bandwidth demand.
 
 ---
 
@@ -121,6 +192,21 @@ Projects like **MobileNetV3** and **EfficientNet** were born from these algorith
 **(c)** Verification:
 - $z = W_{fused} \cdot X + B_{fused} = (2.0 \times 3) + 2.0 = \mathbf{8.0}$
 - The results match exactly, but the network requires only 1 MAC operation instead of 2 MAC operations, and it saves a trip to DRAM between operations!
+
+### Problem 2: The Fusion Breaker
+
+> **Context**: You are compiling a Transformer model. The graph contains: `MatMul -> Add -> Softmax -> MatMul`.
+> 
+> **Tasks**:
+> - (a) Why is **Softmax** significantly harder to fuse into a systolic array pipeline than **ReLU**? [1]
+> - (b) What happens to your DRAM traffic when the compiler hits the Softmax node? [1]
+
+<details>
+<summary><b>Solution</b></summary>
+
+**(a) Global vs Local**: ReLU is a "Pointwise" operator; you only need the current pixel to decide the output. Softmax requires the **Sum of ALL Exponentials** across the entire vector before it can calculate a single output. This requires a global synchronization point that cannot be processed in a streaming systolic way.
+
+**(b) The Pipeline Flush**: The compiler is forced to "flush" the intermediate MatMul results back to DRAM. The CPU or a specialized vector unit must read the entire vector, find the maximum, sum the exponentials, and write it back before the next MatMul can begin. Softmax acts as a **Memory Wall** that breaks the beautiful fusion chain.
 
 </details>
 

@@ -121,6 +121,20 @@ for ai in [10, 100, 250, 500]:
 
 ---
 
+## 5. Worked Example: Three Layers on NVDLA
+
+Let's evaluate three different layers from a computer vision model running on the **NVDLA** accelerator ($12$ TOPS Peak Compute, $48$ GB/s Peak Bandwidth, Ridge Point = $250$ OPS/B).
+
+| Layer Type | Arithmetic Intensity (AI) | Bound | Attainable Performance | Efficiency ($P_{act} / P_{peak}$) |
+|:-----------|:---------------------------|:------|:-----------------------|:---------------------------------|
+| **Pointwise (1x1)** | 4 OPS/B | Memory | $4 \times 48 = \mathbf{0.19}$ TOPS | $1.6\%$ (Terrible) |
+| **Depthwise (3x3)** | 25 OPS/B | Memory | $25 \times 48 = \mathbf{1.2}$ TOPS | $10\%$ (Poor) |
+| **Convolution (3x3)**| 300 OPS/B | Compute| **$12$** TOPS | $100\%$ (Perfect) |
+
+**Conclusion**: The simple 1x1 convolution is starving for data so badly that $98\%$ of the hardware is sitting idle. To fix this, an architect wouldn't add more MACs; they would instead implement **Loop Tiling** to cache the 1x1 weights in SRAM, artificially raising the AI.
+
+---
+
 ## Practice Problems
 
 ### Problem 1: Calculating the Ridge Point
@@ -147,6 +161,26 @@ for ai in [10, 100, 250, 500]:
 - Memory Bandwidth × AI = (48 GB/s) × 100 OPS/Byte
 - = 4800 Giga-OPS = **4.8 TOPS**.
 - The hardware physically has 12 TOPS capability, but due to the memory bottleneck, it only runs at 4.8 TOPS.
+
+### Problem 2: Moving the Dot
+
+> **Context**: You are hired by StartupX to optimize an LLM running on their custom accelerator. The current Attention kernel has an Arithmetic Intensity of **30 OPS/Byte**. The hardware has a Ridge Point of **100 OPS/Byte**.
+> 
+> **Tasks**:
+> - (a) Is the chip currently compute-bound or memory-bound? [1]
+> - (b) If you use **KV Caching** (Module 7), you reduce memory traffic, increasing the AI to **120 OPS/Byte**. By what factor does your throughput (TOPS) increase? [2]
+
+<details>
+<summary><b>Solution</b></summary>
+
+**(a)** The AI (30) < Ridge Point (100). The chip is **Memory-Bound**.
+
+**(b)** Throughput Increase:
+- **Before**: Performance was limited by Memory Bandwidth. Let's call Peak Bandwidth $B$. Performance = $30 \times B$.
+- **After**: The new AI (120) > Ridge Point (100). The chip is now **Compute-Bound**. It is running at its absolute peak (Peak Compute).
+- Peak Compute = Ridge Point $\times B = 100 \times B$.
+- Speedup = (After / Before) = $(100 \times B) / (30 \times B) = \mathbf{3.33x}$.
+- Note: Even though the AI increased by 4x, the performance only increased by 3.33x because we hit the "Compute Roof" along the way!
 
 </details>
 

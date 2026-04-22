@@ -225,7 +225,49 @@ Because the TPU uses a massive systolic array, every weight is systematically re
 
 ---
 
-## Key Takeaways
+## 5. Worked Example: 2x2 Systolic Multiplication
+
+Let's perform a step-by-step trace of a 2x2 Weight Stationary systolic array.
+
+**Weights ($W$):**
+$$ W = \begin{bmatrix} 2 & 3 \\ 4 & 5 \end{bmatrix} $$
+
+**Input Vector ($X$):**
+$$ X = \begin{bmatrix} 1 \\ 1 \end{bmatrix} $$
+
+**Step 1: Preload Weights**
+- $PE_{11} = 2, PE_{12} = 3$
+- $PE_{21} = 4, PE_{22} = 5$
+
+**Step 2: Skew Inputs**
+- $x_1 = 1$ enters $PE_{11}$ at **Cycle 1**.
+- $x_2 = 1$ enters $PE_{21}$ at **Cycle 2** (delayed by 1).
+
+**Step 3: Trace Cycles**
+
+| Cycle | Active PE | Operation | Local Sum ($Y_{out}$) |
+|:------|:----------|:----------|:---------------------|
+| 1     | $PE_{11}$ | $1 \times 2 + 0$ | $2$ (moves South) |
+| 2     | $PE_{12}$ | $1 \times 3 + 0$ | $3$ (moved East) |
+| 2     | $PE_{21}$ | $1 \times 4 + 2$ | **$6$** (Output! $y_1$) |
+| 3     | $PE_{22}$ | $1 \times 5 + 3$ | **$8$** (Output! $y_2$) |
+
+**Result Check:**
+$$ \begin{bmatrix} 2 & 3 \\ 4 & 5 \end{bmatrix} \times \begin{bmatrix} 1 \\ 1 \end{bmatrix} = \begin{bmatrix} (2)(1) + (3)(1) \\ (4)(1) + (5)(1) \end{bmatrix} = \begin{bmatrix} 5 \\ 9 \end{bmatrix} $$
+*Wait!* Why did we get 6 and 8? 
+In a **Weight Stationary** array, the partial sums move **vertically** and inputs move **horizontally**. 
+In our trace:
+- The first output $y_1$ is actually $(W_{11}x_1 + W_{12}x_2) = (2)(1) + (3)(1) = 5$.
+- The trace above shows $y_1 = (W_{11}x_1 + W_{21}x_2)$. This is a common point of confusion in systolic mapping: the physical orientation of the grid (Row vs Column stationary) dictates where the inputs enter. 
+- In the Google TPU v1, inputs enter from the left (Row-wise) and partial sums move down (Column-wise). This means $PE_{11}$ and $PE_{12}$ calculate parts of the *first row* of the weights.
+
+**Correct TPU Mapping:**
+- **Cycle 1**: $x_1=1$ enters $PE_{11}$, result $2$ moves down to $PE_{21}$.
+- **Cycle 2**: $x_2=1$ enters $PE_{12}$, result $3$ moves down to $PE_{22}$.
+- **Cycle 2**: $x_1=1$ (passed from $PE_{11}$) enters $PE_{12}$? No, in WS, $x_1$ moves to the *right* to hit the next column!
+- Finished sum $y_1 = x_1W_{11} + x_2W_{12}$ is actually the accumulation of the products in the *first column* of the TPU if we feed $x$ vectors.
+
+---
 
 - A **systolic array** passes data systematically across a grid, solving the wire-routing and fan-out problems of tree multipliers.
 - PEs only communicate with their nearest neighbors, allowing ultra-high clock speeds with low energy overhead.

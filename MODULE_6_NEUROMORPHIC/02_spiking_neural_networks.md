@@ -88,6 +88,55 @@ In temporal coding, the **time dimension perfectly replaces the bit-depth**.
 In a digital CPU, representing a value with 32-bit precision requires 32 physical wires and a giant multiplier. In a neuromorphic chip, that same 32-bit precision can be represented by the *exact millisecond* a single wire pulses. We have traded complex physical logic (space) for high-resolution timing (time). 
 Every pixel requires only **1 physical spike** to transmit its entire value, resulting in the absolute theoretical minimum energy per inference.
 
+### Code Example: Rate Coding vs. Temporal Coding
+
+```python
+import numpy as np
+
+def encode_rate(value, duration=100):
+    """Frequency-based coding."""
+    # A value of 0.8 fires 80% of the time
+    return (np.random.rand(duration) < value).astype(int)
+
+def encode_temporal(value, duration=100):
+    """Time-to-first-spike coding."""
+    # A high value (1.0) fires at t=1, low value (0.1) fires at t=90
+    spike_train = np.zeros(duration)
+    fire_time = int((1.0 - value) * (duration - 1))
+    spike_train[fire_time] = 1
+    return spike_train
+
+val = 0.7
+rate_spikes = encode_rate(val)
+temp_spikes = encode_temporal(val)
+
+print(f"Value: {val}")
+print(f"Rate Coding Spikes:     {np.sum(rate_spikes)} spikes")
+print(f"Temporal Coding Spikes: {np.sum(temp_spikes)} spike (Always 1!)")
+```
+
+---
+
+## 5. Worked Example: Leaky-Integrate-and-Fire Trace
+
+Let's trace a digital LIF neuron with a decaying membrane potential.
+
+**Parameters**:
+- **Threshold**: $100 \text{ mV}$
+- **Synaptic Weight**: $+40 \text{ mV}$ per spike
+- **Leak**: $10\%$ reduction of current voltage per step
+
+| Time | Event | Voltage (V) Calculation | New Voltage | Fire? |
+|:-----|:------|:------------------------|:------------|:------|
+| 0    | Start | $0$ | $0$ | No |
+| 1    | Spike | $(0 \times 0.9) + 40$ | $40$ | No |
+| 2    | Silence| $(40 \times 0.9)$ | $36$ | No |
+| 3    | Spike | $(36 \times 0.9) + 40$ | $72.4$ | No |
+| 4    | Spike | $(72.4 \times 0.9) + 40$| **$105.16$**| **YES!** |
+| 5    | Reset | $0$ | $0$ | No |
+
+**Conclusion**: In an SNN, the "History" matters. If the final spike at $t=4$ had arrived much later (e.g., at $t=10$), the accumulated voltage would have leaked away, and the neuron would not have fired. This inherent temporal filtering is what makes SNNs so powerful for processing speech and video.
+
 ---
 
 ## 4. Spike-Timing-Dependent Plasticity (STDP)
@@ -104,11 +153,15 @@ STDP is a localized, unsupervised learning rule. It requires no labels, no loss 
 2. **Long-Term Depression (LTD):** If the input spike arrives *shortly after* the neuron already fired, it was useless. **Decrease the weight.**
 
 ```mermaid
-XYChart
-    title "STDP Function"
-    x-axis "Time Difference (t_post - t_pre) in ms" -20 --> 20
-    y-axis "Weight Change (Δw)"
-    line [ -0.1, -0.4, -0.8, -0.2, 0, 0.8, 0.4, 0.1, 0.05 ]
+flowchart TD
+    subgraph STDP ["The STDP Learning Rule"]
+        direction LR
+        PrePost["Pre-spike before Post-spike<br/>(t_post - t_pre > 0)"] -->|Potentiation| UP["Increase Weight<br/>(Delta_w > 0)"]
+        PostPre["Post-spike before Pre-spike<br/>(t_post - t_pre < 0)"] -->|Depression| DOWN["Decrease Weight<br/>(Delta_w < 0)"]
+    end
+    
+    style UP fill:#4CAF50,color:#fff
+    style DOWN fill:#F44336,color:#fff
 ```
 
 **Why this is "Opus-level" efficient:**
@@ -161,6 +214,29 @@ Traditional AI (backpropagation) requires a global "God's Eye" view of the netwo
   - It fires and resets to $0$. So ending voltage is $\mathbf{0.0}$.
 
 **(b)** The neuron reaches the threshold and fires at **$t=4$**.
+
+### Problem 2: Energy per Synaptic Event
+
+> **Context**: You are comparing a 32-bit floating point MAC on a GPU with a Synaptic Event on a Loihi neuromorphic chip.
+> - **GPU MAC**: $200 \text{ pJ}$ (including DRAM fetch).
+> - **Loihi Synaptic Event**: $0.02 \text{ pJ}$ (Addition only, local memory).
+>
+> **Tasks**:
+> - (a) If a neural network requires 1 billion operations, calculate the energy for both. [1]
+> - (b) If the network is 90% sparse (meaning only 10% of neurons actually fire), how does the energy of the Loihi chip change? [1]
+
+<details>
+<summary><b>Solution</b></summary>
+
+**(a) Total Energy:**
+- GPU: $10^9 \times 200 \text{ pJ} = \mathbf{0.2 \text{ Joules}}$.
+- Loihi: $10^9 \times 0.02 \text{ pJ} = \mathbf{0.00002 \text{ Joules}}$.
+
+**(b) Sparse Energy Impact:**
+- A GPU still performs the 1 billion multiplications even if the inputs are zero (unless it has specialized zero-skip hardware).
+- An SNN *only* consumes energy when a spike occurs. If only 10% of spikes happen, the Loihi chip only performs $100$ million operations.
+- New Energy: $0.1 \times 0.00002 = \mathbf{0.000002 \text{ Joules}}$.
+- **Result**: The combination of simplified math and event-driven sparsity makes the SNN **$100,000\times$** more efficient in this scenario.
 
 </details>
 

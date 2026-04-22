@@ -11,30 +11,31 @@
 
 ## 1. The Key Insight: Training vs. Inference in Hardware
 
-Before designing any ML hardware, we must understand a critical distinction:
-
-| Phase | What Happens | Where It Runs | Hardware Complexity |
+| Phase | What Happens | Primary Hardware | Performance Goal |
 |:---|:---|:---|:---|
-| **Training** | Learn model parameters from data | Software (Python, scikit-learn) | Very high — iterative optimization |
-| **Inference** | Apply learned model to new data | **Custom hardware (FPGA/ASIC)** | Manageable — fixed operations |
+| **Training** | Learn model weights from data | **High-Compute (GPU/TPU Clusters)** | Maximize **Throughput** (Samples/sec) |
+| **Inference** | Apply model to new data | **Deployment (Edge / FPGA / ASIC)** | Minimize **Latency** (ms per query) |
 
-**We design hardware for inference, not training.** Training happens once in software and produces a fixed model (parameters, thresholds, structure). Our job is to take that trained model and implement it as a circuit that runs inference as fast and efficiently as possible.
+**The hardware requirements are fundamentally different.** Training requires massive floating-point precision and huge memory bandwidth to process trillions of data points. Inference requires efficiency, low power, and deterministic speed to provide instant answers in the real world (like a self-driving car detecting a pedestrian). 
+
+In this curriculum, we focus primarily on **Inference Acceleration** — taking a pre-trained model and building the custom silicon to run it at the speed of light.
 
 ```mermaid
 flowchart LR
-    subgraph Software["☁️ Software Phase"]
-        D["📦 Dataset"] --> T["🧮 Training<br/>(scikit-learn)"]
-        T --> M["📋 Trained Model<br/>(Parameters)"]
+    subgraph DataCenter["🏢 Training Phase (Cloud)"]
+        D["📦 Big Data"] --> T["🔥 Training Accelerator<br/>(GPU / TPU Cluster)"]
+        T --> M["📋 Trained Model<br/>(Fixed Weights)"]
     end
     
-    subgraph Hardware["⚡ Hardware Phase"]
-        M --> H["🔧 Circuit Design<br/>(FPGA / ASIC)"]
-        H --> I["🚀 Fast Inference<br/>(< 1μs per query)"]
+    subgraph Edge["⚡ Inference Phase (Edge/Device)"]
+        M --> H["🔧 Custom Accelerator<br/>(NPU / FPGA / ASIC)"]
+        H --> I["🚀 Instant Result<br/>(< 1μs Latency)"]
     end
     
     style D fill:#4CAF50,color:#fff
     style M fill:#FF9800,color:#fff
     style I fill:#2196F3,color:#fff
+    style T fill:#F44336,color:#fff
 ```
 
 > **Analogy**: Training is like writing a recipe (slow, iterative, creative). Inference is like cooking from that recipe (fast, repetitive, optimizable). We build a special kitchen (hardware) optimized for the recipe, not for the recipe-writing process.

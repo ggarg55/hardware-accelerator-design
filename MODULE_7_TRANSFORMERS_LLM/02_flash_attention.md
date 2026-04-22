@@ -18,14 +18,14 @@ Building on the previous chapter, we know that standard hardware runs Self-Atten
 
 ```mermaid
 flowchart TD
-    subgraph HBM (Slow DRAM)
+    subgraph HBM ["HBM (Slow DRAM)"]
         QKV["Q, K, V"] 
         S["Huge N x N (S)"]
         P["Huge N x N (P)"]
         O["Result (O)"]
     end
     
-    subgraph SRAM (Fast, Small Cache)
+    subgraph SRAM ["SRAM (Fast, Small Cache)"]
         ALU(("GPU ALUs"))
     end
     
@@ -101,6 +101,61 @@ flowchart LR
 ### Result: The $N \times N$ Matrix is Never Stored
 In Flash Attention, the terrifying $N \times N$ matrices ($S$ and $P$) **never exist in HBM**. They are born, processed, and consumed entirely inside the fast SRAM tile by tile. Only the final output $O$ (which is $N \times d$) is written back to HBM.
 
+### Code Example: Simulating the Online Softmax Trick
+
+```python
+import numpy as np
+
+def online_softmax_step(m_prev, l_prev, p_prev, tile_scores):
+    """
+    Simulate updating the softmax denominator and scaling 
+    previous partial results without having the full row.
+    """
+    # 1. Find local max of new tile
+    m_tile = np.max(tile_scores)
+    
+    # 2. Update global max
+    m_new = max(m_prev, m_tile)
+    
+    # 3. Scale previous sum and partial result to the new max
+    l_new = l_prev * np.exp(m_prev - m_new) + np.sum(np.exp(tile_scores - m_new))
+    
+    # The actual hardware then rescales the output P based on l_new/l_prev
+    return m_new, l_new
+
+# Imagine processing two tiles of scores: [2, 4] and [1, 5]
+row_tile_1 = np.array([2.0, 4.0])
+m1, l1 = np.max(row_tile_1), np.sum(np.exp(row_tile_1 - np.max(row_tile_1)))
+
+print(f"After Tile 1: Max={m1}, SumExp={l1}")
+
+row_tile_2 = np.array([1.0, 5.0])
+m2, l2 = online_softmax_step(m1, l1, None, row_tile_2)
+
+print(f"After Tile 2: Max={m2}, SumExp={l2}")
+# This allows us to keep computing without ever storing the full row!
+```
+
+---
+
+## 4. Worked Example: Flash Attention Memory Traffic (N=32k)
+
+Let's calculate the physical traffic on the HBM bus for a sequence length of **32,768** with hidden dimension **1,024**.
+
+**Standard Attention Traffic**:
+1. Write Score Matrix ($N^2$): $32k \times 32k = 1.07 \text{ billion elements}$.
+2. Read Score Matrix for Softmax: $1.07 \text{ billion elements}$.
+3. Write Prob Matrix: $1.07 \text{ billion elements}$.
+4. Read Prob Matrix for Value Mult: $1.07 \text{ billion elements}$.
+- **Total intermediate traffic**: $4.28 \text{ billion elements} \times 2 \text{ bytes} \approx \mathbf{8.5 \text{ GB}}$.
+
+**Flash Attention Traffic**:
+1. Load $Q, K, V$ ($3 \times N \times d$): $3 \times 32k \times 1k = 98 \text{ million elements}$.
+2. Write Output $O$ ($1 \times N \times d$): $32k \times 1k = 32 \text{ million elements}$.
+- **Total traffic**: $130 \text{ million elements} \times 2 \text{ bytes} \approx \mathbf{0.26 \text{ GB}}$.
+
+**Conclusion**: Flash Attention reduced the HBM traffic for this layer by **$32\times$**. Instead of waiting for the memory bus, the GPU is now constantly busy doing math.
+
 ---
 
 ## Key Takeaways
@@ -127,6 +182,23 @@ In Flash Attention, the terrifying $N \times N$ matrices ($S$ and $P$) **never e
 - **Standard Attention**: Requires allocating and storing the $N \times N$ matrices ($S$ and $P$) in HBM. Furthermore, it reads and writes these massive matrices multiple times across the kernels. The memory bandwidth scales at **$O(N^2)$**, exactly following the matrix size.
 - **Flash Attention**: Tiling means that $Q$, $K$, and $V$ matrices (which are $N \times d$) are loaded from HBM, and the output $O$ (which is $N \times d$) is written to HBM. The $N \times N$ matrices only ever exist ephemerally inside the internal SRAM. Therefore, traversing the HBM bus only happens for the core sequences, resulting in memory bandwidth scaling that is **$O(N)$**. 
 - Flash Attention changes the memory bandwidth complexity from quadratic to linear!
+
+### Problem 2: The Block Size Constraint
+
+> **Context**: You are implementing Flash Attention on a custom ASIC with only **512 KB** of SRAM. You need to load blocks of $Q$, $K$, and $V$ simultaneously. Each element is 2 bytes (FP16).
+> 
+> **Tasks**:
+> - (a) If your blocks are square ($B \times d$) and your hidden dimension $d$ is **1024**, what is the maximum block height $B$ you can afford if you must hold 3 blocks in memory ($Q_{tile}, K_{tile}, V_{tile}$)? [2]
+
+<details>
+<summary><b>Solution</b></summary>
+
+- Total SRAM = $512 \times 1024 = 524,288$ bytes.
+- Size of one block ($B \times 1024 \times 2$ bytes) = $2048 \times B$ bytes.
+- 3 blocks must fit: $3 \times (2048 \times B) \le 524,288$.
+- $6144 \times B \le 524,288$.
+- $B \le 85.3$.
+- **Result**: You would pick a block size of **$B=64$** (to keep it a power of 2 for easy addressing). 
 
 </details>
 

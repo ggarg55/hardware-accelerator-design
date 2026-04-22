@@ -53,9 +53,18 @@ Because the dataflow relies on flexible logical folding rather than a strictly r
 
 The Row Stationary structure allows Eyeriss to maximize reuse, but doing so requires a significantly more complex memory architecture than standard designs. Eyeriss features a **3-Level Hierarchical Memory** layout:
 
-1. **Global Buffer (GLB):** 108 KB on-chip SRAM. This hides the latency of the DRAM and caches large chunks of feature maps.
-2. **Network-on-Chip (NoC):** A flexible routing system that lets the GLB talk to any PE using Multicast and Unicast patterns. It routes streaming rows of inputs perfectly diagonally across the array.
-3. **Scratchpad Memory (SPad):** Unlike the TPU's barebones MACs, **every single Eyeriss PE contains its own multi-tiered SPad** (a miniature local SRAM holding a few hundred bytes). 
+```mermaid
+graph TD
+    DRAM((Off-chip DRAM)) -->|1000 pJ| GLB[Global Buffer<br/>108 KB SRAM]
+    GLB -->|50 pJ| NoC{{Flexible NoC Router}}
+    NoC -->|20 pJ| SPad[PE Scratchpad<br/>Registers]
+    SPad -->|1 pJ| ALU[ALU MAC Unit]
+    
+    style GLB fill:#2196F3,color:#fff
+    style NoC fill:#9C27B0,color:#fff
+    style SPad fill:#FF9800,color:#fff
+    style ALU fill:#4CAF50,color:#fff
+```
 
 This hierarchy perfectly mirrors the relative energy costs table from Chapter 2. By capturing sliding window operands at the absolute lowest tier of memory (the SPad), Eyeriss minimized global wire trips and drastically drove down energy per inference.
 
@@ -81,6 +90,58 @@ Eyeriss uses a technique called **Run-Length Encoding (RLE)** natively in its ha
 - **The PE is programmed to clock-gate (turn off) its MAC multiplier** when it receives the skip signal. 
 
 This compression technique reduces memory bandwidth by 30-50% and literally turns off the power-hungry logic gates whenever sparsity occurs!
+
+### Code Example: Simulating Zero-Skipping (RLE)
+
+```python
+def simulate_eyeriss_rle(data_stream):
+    """Simulate hardware-level zero-skipping via RLE."""
+    compressed_packets = []
+    skip_count = 0
+    energy_with_rle = 0
+    
+    for val in data_stream:
+        if val == 0:
+            skip_count += 1
+        else:
+            # Packet contains value and number of zeros skipped before it
+            compressed_packets.append({"val": val, "skip": skip_count})
+            skip_count = 0
+            energy_with_rle += 1  # 1 unit for processing non-zero
+            
+    return compressed_packets, energy_with_rle
+
+# Imagine a post-ReLU activation stream
+stream = [12, 0, 0, 0, 8, 0, 0, 4, 0]
+packets, energy = simulate_eyeriss_rle(stream)
+
+print(f"Original Stream:   {stream}")
+print(f"Compressed (RLE): {packets}")
+print(f"Energy (Naive):   {len(stream)}")
+print(f"Energy (Eyeriss): {energy} (Clock-gated the zeros!)")
+```
+
+---
+
+## 6. Worked Example: Mapping a 3x3 Filter
+
+Let's see how Eyeriss maps a single $3 \times 3$ filter onto its grid using Row Stationary logic.
+
+**Filter ($W$):**
+- Row 1 ($R_1$): `[w1, w2, w3]`
+- Row 2 ($R_2$): `[w4, w5, w6]`
+- Row 3 ($R_3$): `[w7, w8, w9]`
+
+**Hardware Mapping:**
+- **PE(x, 1)**: Loaded with $R_1$. Stays stationary.
+- **PE(x, 2)**: Loaded with $R_2$. Stays stationary.
+- **PE(x, 3)**: Loaded with $R_3$. Stays stationary.
+
+**Data Flow:**
+1. **Input Stream**: A row of pixels $I_{row}$ is multicast to the column.
+2. **PE(x, 1)**: Computes 1D conv of $I_{row} * R_1$. Result passed down.
+3. **Synchronization**: By the time $I_{row}$ reaches PE(x, 2) in the next cycle, it is combined with the partial sum from PE(x, 1).
+4. **Efficiency**: Because the filter is stationary, we only read the 9 weights from global memory **once**. Because the input row is multicast, we read it from the buffer **once** for all three PEs.
 
 ---
 
@@ -114,6 +175,23 @@ This compression technique reduces memory bandwidth by 30-50% and literally turn
 
 **(b)** Eyeriss Flexibility:
 - RS breaks the $5 \times 5$ grid down into five 1D rows of size $1 \times 5$. It assigns them to 5 PEs in a column. Due to the NoC, it can duplicate this work across different rows and columns dynamically, computing different sliding fragments of the input map in parallel across the rest of the PEs to keep utilization high.
+
+### Problem 2: Energy Savings through RLE
+
+> **Context**: An Eyeriss-like chip is processing a layer where $60\%$ of activations are zero. 
+> - A standard MAC operation consumes **10 pJ**.
+> - Clock-gating a PE (when a skip is detected) reduces its consumption to **0.5 pJ** for that cycle.
+>
+> **Tasks**:
+> - Calculate the average energy consumption per MAC cycle for this layer. [2]
+
+<details>
+<summary><b>Solution</b></summary>
+
+- $40\%$ of cycles are active: $0.4 \times 10 \text{ pJ} = 4 \text{ pJ}$.
+- $60\%$ of cycles are gated: $0.6 \times 0.5 \text{ pJ} = 0.3 \text{ pJ}$.
+- Average Energy = $4 + 0.3 = \mathbf{4.3 \text{ pJ}}$.
+- **Result**: Even without pruning the weights, simple hardware-level zero-skipping reduces the active compute energy by over **57%**.
 
 </details>
 

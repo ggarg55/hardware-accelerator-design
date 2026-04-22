@@ -79,6 +79,34 @@ Instead, the compiler analyzes the Neural Network graph *before* it runs and cal
 In a standard GPU, nearly **$20\% - 30\%$ of the silicon area** is dedicated to managing the complexity of dynamic scheduling (figuring out what to do next). By moving this entire burden to the **software compiler**, Groq can reclaim that silicon area to pack in thousands of additional ALUs and more SRAM. 
 This is the "Software-Defined Hardware" paradigm: the hardware only exists to execute a perfectly choreographed, pre-scheduled dance of bytes.
 
+### Code Example: Simulating a Static TSP Schedule
+
+```python
+import collections
+
+def simulate_groq_schedule(layers):
+    """
+    Simulate the deterministic travel of a token 
+    through a chain of LPU chips.
+    """
+    # In a Groq LPU, there are 0 cache misses.
+    # Every operation takes EXACTLY N cycles.
+    TIME_PER_LAYER_MS = 1.2 # Constant!
+    
+    total_time = 0
+    print("Cycle | Action             | Chip ID | Arrival Time")
+    print("-" * 52)
+    
+    for i in range(layers):
+        total_time += TIME_PER_LAYER_MS
+        action = f"Compute Layer {i+1}"
+        chip_id = i % 8 # Distributed across 8 chips
+        print(f"{i*100:5} | {action:18} | {chip_id:7} | {total_time:6.2f} ms")
+
+# Simulate a 12-layer attention block
+simulate_groq_schedule(12)
+```
+
 ---
 
 ## 4. The Future of AI Hardware
@@ -89,6 +117,27 @@ As we scale toward Artificial General Intelligence (AGI), we are seeing deep div
 1. **Training Accelerators (GPUs/TPUs):** Focused on massive parallel throughput, HBM scaling, and handling exabytes of data.
 2. **Inference Accelerators (LPUs):** Focused purely on latency, minimizing the memory wall, and delivering instant deterministic AI generation for consumers.
 3. **Edge AI (Neuromorphic/CIM/NPU):** Focused entirely on pulling watts down to milliwatts by co-locating memory, utilizing sparsity, and imitating biology so AI can live on batteries.
+
+---
+
+## 5. Worked Example: The Power of Scale (SRAM TCO)
+
+Suppose you need to serve $1 \text{ Million}$ tokens per day.
+
+**Scenario A: 1 Legacy GPU (A100/H100)**
+- **Hardware Cost**: $\$30,000$ per chip.
+- **Speed**: $30 \text{ tokens/sec}$.
+- **Utilization**: $100\%$.
+- **Latency**: $33 \text{ ms/token}$.
+- **Cost per Token**: Medium.
+
+**Scenario B: 640 Groq LPUs (The SRAM Cluster)**
+- **Hardware Cost**: $\approx \$10 \text{ Million}$ for the rack.
+- **Speed**: $500 \text{ tokens/sec}$.
+- **Latency**: $2 \text{ ms/token}$.
+- **Cost per Token**: Very high (Infrastructure) but **Very low (Operating Energy)**.
+
+**Conclusion**: If your goal is "Real-Time AI Agents" that feel human, you **must** pay the "SRAM Tax." The Groq architecture proves that while DRAM is cheaper per byte, SRAM is cheaper per *second of human time*.
 
 ---
 
@@ -127,6 +176,25 @@ As we scale toward Artificial General Intelligence (AGI), we are seeing deep div
 - Speed = $1 / 0.00125 = \mathbf{800 \text{ Tokens / second.}}$
 
 *Because generation cannot proceed until the weights cross the memory physical bus, the LPU's shift to SRAM allows it to type words out $26\times$ faster than the standard GPU.*
+
+</details>
+
+---
+
+### Problem 2: The Soft-Hardware Boundary
+
+> **Context**: Groq claims they have "Deterministic Execution."
+>
+> **Tasks**:
+> - (a) If a chip has No Branch Predictor and No Cache, what happens if the software compiler fails to provide the data at the exact right nanosecond? [1]
+> - (b) Why is this architecture "Instruction-less" in the traditional sense? [1]
+
+<details>
+<summary><b>Solution</b></summary>
+
+**(a)** The hardware is "blind." It will simply perform the multiplication on whatever electrical noise happens to be on the wires at that moment. This would result in "Garbage Output." The correctness of the AI is 100% the responsibility of the **Compiler**, not the Hardware.
+
+**(b)** In a traditional CPU, an instruction like `ADD` is fetched, decoded, and then executed. On a Groq LPU, the "Instruction" is effectively the **Schedule**. The chip just cycles through a series of physical connections. There is no decoding phase; the movement of data across the silicon *is* the logic.
 
 </details>
 

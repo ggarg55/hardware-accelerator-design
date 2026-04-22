@@ -36,19 +36,19 @@ To a GPU or TPU, this equation is broken down into four distinct computational k
 
 ```mermaid
 flowchart TD
-    subgraph The QK^T Phase
+    subgraph The QK_Phase ["The QK^T Phase"]
         Q["Q Matrix (N x d)"] --> MUL1(("Matrix Multiply"))
         K["K^T Matrix (d x N)"] --> MUL1
         MUL1 --> S["Scores: S = QK^T (N x N)"]
     end
     
-    subgraph The Softmax Phase
-        S --> SCALE["Scale by 1/sqrt(d_k)"]
+    subgraph The Softmax_Phase ["The Softmax Phase"]
+        S --> SCALE["Scale by Square Root of d_k"]
         SCALE --> SM["Softmax (Row-wise Exponentiation)"]
         SM --> P["Probabilities: P (N x N)"]
     end
     
-    subgraph The Value Phase
+    subgraph The Value_Phase ["The Value Phase"]
         P --> MUL2(("Matrix Multiply"))
         V["V Matrix (N x d)"] --> MUL2
         MUL2 --> OUT["Output: O (N x d)"]
@@ -94,6 +94,41 @@ Because it doesn't fit in SRAM, the GPU is forced to calculate pieces of the $N 
 
 Standard Attention spends 90% of its time moving the intermediate $N \times N$ matrix across the memory bus rather than actually computing the final answer.
 
+### Code Example: Calculating the "Quadratic Wall"
+
+```python
+def calculate_attention_memory(N, heads=12, byte_precision=2):
+    """Calculate memory footprint of the intermediate NxN attention matrix."""
+    elements = heads * (N ** 2)
+    bytes_total = elements * byte_precision
+    return bytes_total / (1024 ** 2)  # Return in MB
+
+for n in [512, 1024, 4096, 16384]:
+    mb = calculate_attention_memory(n)
+    print(f"Sequence Length {n:5} | Memory: {mb:8.2f} MB")
+
+# At 16k tokens, we need 6GB just for a single layer's intermediate scores!
+```
+
+---
+
+## 4. Worked Example: The Attentional Memory Wall
+
+Suppose you have a GPU with **40 MB** of fast SRAM and **2,000 GB/s** of HBM bandwidth. You are processing a sequence of $N = 8192$.
+
+**1. Calculate Matrix Size**:
+- $N \times N = 8192^2 = 67,108,864$ elements.
+- In FP16 (2 bytes): $67.1M \times 2 = \mathbf{134.2 \text{ MB}}$.
+
+**2. The SRAM Overflow**:
+- Since $134.2 \text{ MB} > 40 \text{ MB}$, the GPU cannot hold the attention weights for even *one* head in its fast cache.
+- The GPU must compute the scores, write them to DRAM, read them back for Softmax, and write them again.
+
+**3. The Traffic Jam**:
+- Total bytes moved for this layer (simplified): $\text{Score Write} + \text{Softmax Read} + \text{Softmax Write} + \text{Value Read}$
+- $134 \text{ MB} \times 4 = 536 \text{ MB}$.
+- Even at $2000 \text{ GB/s}$, moving this much intermediate data for every single attention head across 96 layers causes the massive "HBM bottleneck" that slows down LLM training.
+
 ---
 
 ## Key Takeaways
@@ -135,6 +170,21 @@ Standard Attention spends 90% of its time moving the intermediate $N \times N$ m
 - Across all 12 heads: $1,073,741,824 \times 12 = 12,884,901,888 \text{ elements}$.
 - Storage (2 Bytes): $12,884,901,888 \times 2 = \mathbf{25,769,803,776 \text{ Bytes} \ (\approx 25.8 \text{ GB})}$.
 - *Crushes the SRAM. Requires massive, slow DRAM swapping for a single layer.*
+
+### Problem 2: Softmax Tiling Constraints
+
+> **Context**: You are trying to optimize the Softmax operation ($e^{x_i} / \sum e^{x_j}$) in a systolic array. 
+>
+> **Tasks**:
+> - (a) Why can't we compute the final Softmax value for the 1st element of a row if we only have the first half of the row in the local SRAM? [1]
+> - (b) Contrast this with a **ReLU** operation. Can ReLU be tiled? [1]
+
+<details>
+<summary><b>Solution</b></summary>
+
+**(a)** Because Softmax requires the **global sum** (the denominator) of the entire row. You cannot normalize the first element until you have seen the very last element to know the total sum. This "Global Dependency" is what forces the entire $N \times N$ matrix to be materialized in memory.
+
+**(b)** Yes. ReLU is a **Pointwise** operation. To compute `max(0, x)`, you only need `x`. You don't need to know anything about the other pixels in the row. This makes ReLU perfectly "tileable" and "fusable," whereas standard Softmax is a "Fusion-Breaker."
 
 </details>
 
